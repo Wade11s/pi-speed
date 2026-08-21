@@ -1,5 +1,7 @@
 # pi-speed
 
+English | [简体中文](README_zh.md)
+
 A pi extension that shows the current session's TPS (tokens per second) in the footer, right after the context window indicator, with speed-tier indication.
 
 ## Features
