@@ -1,0 +1,35 @@
+{
+  "name": "pi-speed",
+  "version": "0.1.0",
+  "description": "Pi extension: live TPS (tokens/sec) indicator with speed tiers in the footer, right after the context window",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "tps",
+    "tokens-per-second",
+    "speed",
+    "footer"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/Wade11s/pi-speed.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Wade11s/pi-speed/issues"
+  },
+  "homepage": "https://github.com/Wade11s/pi-speed#readme",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
