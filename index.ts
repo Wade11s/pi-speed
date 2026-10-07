@@ -7,7 +7,7 @@
  * - Replicates the built-in footer via ctx.ui.setFooter() to insert TTFT → TPS → TOTAL
  *   after the context window indicator
  * - Whole-reply time includes tools/retries; TTFT is the first observed non-empty delta
- * - /tps command: show speed and timing details; /tps reset resets stats
+ * - /speed command: show speed and timing details; /speed reset resets stats
  *
  * Install: put this under ~/.pi/agent/extensions/pi-speed/ or .pi/extensions/pi-speed/
  */
@@ -527,8 +527,8 @@ export default function (pi: ExtensionAPI) {
 		requestRender = undefined;
 	});
 
-	pi.registerCommand("tps", {
-		description: "Show session TPS, whole-reply time and TTFT (/tps reset to reset)",
+	pi.registerCommand("speed", {
+		description: "Show session speed and timing stats: TPS, TTFT and reply time (/speed reset to reset)",
 		handler: async (args, ctx) => {
 			if (args.trim().toLowerCase() === "reset") {
 				if (reply || current) {

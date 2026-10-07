@@ -69,6 +69,7 @@ function fixture(t: TestContext, entries: Entry[] = [], mode = "tui", ansi = fal
 	});
 	return {
 		entries, statuses, ctx, emit,
+		commandNames: () => [...commands.keys()],
 		useBranch: (selected: Entry[]) => { branch = selected; },
 		at: (ms: number) => { now = ms; wall = 1_000_000 + ms; },
 		wallAt: (ms: number) => { wall = ms; },
@@ -89,11 +90,16 @@ function fixture(t: TestContext, entries: Entry[] = [], mode = "tui", ansi = fal
 		disposeFooter: () => footer?.dispose?.(),
 		tick: (ms: number) => t.mock.timers.tick(ms),
 		stats: async (args = "") => {
-			await commands.get("tps")!.handler(args, ctx);
+			await commands.get("speed")!.handler(args, ctx);
 			return notifications.at(-1)!;
 		},
 	};
 }
+
+test("registers only /speed without legacy command aliases", (t) => {
+	const f = fixture(t);
+	assert.deepEqual(f.commandNames(), ["speed"]);
+});
 
 test("TTFT switches from hourglass to emoji lightning and cumulative time uses TOTAL", async (t) => {
 	const f = fixture(t);

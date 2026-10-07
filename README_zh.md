@@ -10,14 +10,15 @@ pi 扩展：在原生 `Working…` 后用括号显示整轮回复用时；footer
 - **实时 TPS**：Unicode delta 字符数 ÷4 粗估，标记 `≈`；积累至少 200ms 后显示，避免启动时数值不稳定
 - **最终 TPS**：provider 报告的 `usage.output` ÷ 客户端生成耗时（首个非空 delta → 消息结束）
 - **Session 平均 TPS**：有有效耗时的总 tokens ÷ 总生成时间，即按耗时加权。保留短回复；无 delta / 零耗时不参与 TPS 平均，但仍计入消息和 token 数
-- **整轮回复用时**：调用准备开始 → 最终 `agent_settled`，包含 thinking、工具执行、重试、压缩和自动续跑；运行时通过原生 `ctx.ui.setWorkingMessage()` 显示为输入框上方的 `Working… (12.3s)`，结束后恢复默认提示，最近整轮用时可在 `/tps` 查看
+- **整轮回复用时**：调用准备开始 → 最终 `agent_settled`，包含 thinking、工具执行、重试、压缩和自动续跑；运行时通过原生 `ctx.ui.setWorkingMessage()` 显示为输入框上方的 `Working… (12.3s)`，结束后恢复默认提示，最近整轮用时可在 `/speed` 查看
 - **⚡️ 首 Token 等待（TTFT）**：整轮开始 → 首个非空 text / thinking / tool-call delta；等待时保留 `⏳`，收到后切换为 emoji 样式 `⚡️` 并固定耗时，没有观察到 delta 则显示 `n/a`
 - **🕒 TOTAL Session 累计回复用时**：已测量整轮耗时之和，运行时加上当前已用时间，不含两轮之间的用户空闲时间
 - context window 后按 **TTFT → TPS → TOTAL** 排列，统一「图标 → 标签 → 数值 → 单位」，指标间用 ` · ` 分隔；标签 / 单位弱化，数值清晰，仅 TPS 数值按档位着色，平均值标记放在 `TPS(avg)` 标签上
 - 窄终端将整组指标换行，顺序不变；整轮用时不再重复显示在 footer
 - 保留其他扩展的 status 行
-- `/tps` — 查看消息 / token 数、TPS 有效样本覆盖、最近整轮用时 / TTFT、结束状态和累计用时
-- `/tps reset` — 持久化重置速度及用时统计（仅空闲时允许）
+- `/speed` — 查看消息 / token 数、TPS 有效样本覆盖、最近整轮用时 / TTFT、结束状态和累计用时
+- `/speed reset` — 持久化重置速度及用时统计（仅空闲时允许）
+- 本扩展仅注册 `/speed`，不保留旧命令别名；更新后执行 Pi 内置 `/reload` 或重启 Pi 生效
 - `/new` 从零开始；`/resume`、reload 恢复统计；`/fork`、`/tree` 跟随当前分支已有统计
 
 ## 样式示例

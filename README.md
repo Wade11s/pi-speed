@@ -10,14 +10,15 @@ A pi extension that adds parenthesized whole-reply time to Pi's native `Working�
 - **Live TPS**: approximate Unicode delta character counts ÷4, marked `≈`; waits for a 200ms sample window to avoid unstable startup values
 - **Final TPS**: provider-reported `usage.output` ÷ client-observed generation time (first non-empty delta → message end)
 - **Session average TPS**: total measured tokens ÷ total measured generation time (a time-weighted average). Short replies are retained; unknown/zero durations are excluded from the TPS sample, not from message/token counts
-- **Whole-reply time**: call preparation → final `agent_settled`, including thinking, tools, retries, compaction, and automatic continuation; displayed above the input as `Working… (12.3s)` via the native `ctx.ui.setWorkingMessage()`. The default label is restored when done; `/tps` retains the latest completed duration
+- **Whole-reply time**: call preparation → final `agent_settled`, including thinking, tools, retries, compaction, and automatic continuation; displayed above the input as `Working… (12.3s)` via the native `ctx.ui.setWorkingMessage()`. The default label is restored when done; `/speed` retains the latest completed duration
 - **⚡️ TTFT**: reply start → first non-empty text/thinking/tool-call delta; shows `⏳` while waiting, then switches to emoji-style `⚡️` and freezes the duration. No observed delta means `n/a`
 - **🕒 TOTAL Session reply time**: sum of measured whole replies, including the current reply while running, excluding idle time between replies
 - After the context window indicator, metrics appear as **TTFT → TPS → TOTAL**, consistently ordered as icon → label → value → unit and separated by ` · `. Labels/units are muted; values stay legible and only TPS values use tier colors. Averaging mode belongs to the `TPS(avg)` label
 - The entire metric group wraps on narrow terminals without changing order; whole-reply elapsed time is no longer duplicated in the footer
 - Other extensions' status lines are preserved
-- `/tps` — show message/token counts, measured TPS coverage, latest reply/TTFT, outcome, and cumulative reply time
-- `/tps reset` — persistently reset speed and timing stats (only while idle)
+- `/speed` — show message/token counts, measured TPS coverage, latest reply/TTFT, outcome, and cumulative reply time
+- `/speed reset` — persistently reset speed and timing stats (only while idle)
+- This extension registers only `/speed`, with no command aliases. After updating, run Pi's built-in `/reload` or restart Pi
 - `/new` starts fresh; `/resume` and reload restore saved stats; `/fork` and `/tree` follow the selected branch's saved history
 
 ## Style Examples
