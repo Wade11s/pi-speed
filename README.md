@@ -2,26 +2,39 @@
 
 English | [简体中文](README_zh.md)
 
-A pi extension that shows the current session's TPS (tokens per second) in the footer, right after the context window indicator, with speed-tier indication.
+A pi extension that adds parenthesized whole-reply time to Pi's native `Working…` indicator, with footer metrics ordered as time to first token (TTFT) → TPS → cumulative session reply time.
 
 ## Features
 
-- **Speed tiers** (based on 2026-08 cross-provider median benchmarks, rounded quartiles across 122 models): >150 tok/s 🚀 green / 50–150 🚄 yellow / <50 🐢 red
-- **Live TPS**: estimated from streaming delta character counts (÷4) during output, refreshed every 200ms
-- **Final TPS**: computed per assistant message from the real `usage.output` and generation time (first delta → message end)
-- **Session average TPS**: token-weighted average across all messages
-- Display position: on the footer stats line, **right after the context window indicator** (e.g. `12.3%/128K (auto) 🚄 47.8 tok/s avg`)
-- Implemented via `ctx.ui.setFooter()` replicating the built-in footer; other extensions' status lines are unaffected
-- `/tps` — show stats details (message count, total tokens, generation time, last/avg TPS)
-- `/tps reset` — reset stats
-- Stats reset automatically on `/new`, `/resume`, `/fork` session switches
+- **Speed tiers**: ≥150 tok/s 🚀 green / 50–<150 🚄 yellow / <50 🐢 red
+- **Live TPS**: approximate Unicode delta character counts ÷4, marked `≈`; waits for a 200ms sample window to avoid unstable startup values
+- **Final TPS**: provider-reported `usage.output` ÷ client-observed generation time (first non-empty delta → message end)
+- **Session average TPS**: total measured tokens ÷ total measured generation time (a time-weighted average). Short replies are retained; unknown/zero durations are excluded from the TPS sample, not from message/token counts
+- **Whole-reply time**: call preparation → final `agent_settled`, including thinking, tools, retries, compaction, and automatic continuation; displayed above the input as `Working… (12.3s)` via the native `ctx.ui.setWorkingMessage()`. The default label is restored when done; `/tps` retains the latest completed duration
+- **⚡️ TTFT**: reply start → first non-empty text/thinking/tool-call delta; shows `⏳` while waiting, then switches to emoji-style `⚡️` and freezes the duration. No observed delta means `n/a`
+- **🕒 TOTAL Session reply time**: sum of measured whole replies, including the current reply while running, excluding idle time between replies
+- After the context window indicator, metrics appear as **TTFT → TPS → TOTAL**, consistently ordered as icon → label → value → unit and separated by ` · `. Labels/units are muted; values stay legible and only TPS values use tier colors. Averaging mode belongs to the `TPS(avg)` label
+- The entire metric group wraps on narrow terminals without changing order; whole-reply elapsed time is no longer duplicated in the footer
+- Other extensions' status lines are preserved
+- `/tps` — show message/token counts, measured TPS coverage, latest reply/TTFT, outcome, and cumulative reply time
+- `/tps reset` — persistently reset speed and timing stats (only while idle)
+- `/new` starts fresh; `/resume` and reload restore saved stats; `/fork` and `/tree` follow the selected branch's saved history
 
 ## Style Examples
 
 ```
-↑1.2k ↓8.5k R230k CH95.2% $0.123 12.3%/128K (auto) 🚀 95.2 tok/s      ← fast (green)
-↑1.2k ↓8.5k R230k CH95.2% $0.123 12.3%/128K (auto) 🚄 47.8 tok/s avg  ← medium (yellow)
-↑1.2k ↓8.5k R230k CH95.2% $0.123 12.3%/128K (auto) 🐢 18.3 tok/s      ← slow (red)
+# Native Working indicator above the input while running
+⠋ Working… (5.0s)
+
+# Footer: TTFT → TPS → TOTAL
+12.3%/128k (auto) ⏳ TTFT 1.2s… · 🕒 TOTAL 4m21s
+12.3%/128k (auto) ⚡️ TTFT 1.2s · 🚀 TPS ≈168 tok/s · 🕒 TOTAL 4m25s
+12.3%/128k (auto) ⚡️ TTFT 1.2s · 🚄 TPS(avg) 95.2 tok/s · 🕒 TOTAL 4m32s
+
+# Narrow terminal: the metric group wraps below the stats line
+12.3%/128k (auto)
+⚡️ TTFT 1.2s · 🐢 TPS(avg) 18.3 tok/s
+🕒 TOTAL 4m32s
 ```
 
 ## Install
@@ -62,6 +75,21 @@ Tier thresholds come from the BenchLM cross-provider runtime median benchmark (2
 ## Notes
 
 - The custom footer is replicated from pi's built-in `FooterComponent`; if a pi upgrade changes the built-in footer style, this extension needs to be updated accordingly
-- Live TPS is an estimate (chars ÷ 4) during streaming; the idle average uses the provider-reported real token count
+- Lightning uses U+26A1 + U+FE0F to request emoji presentation, with a yellow foreground fallback; color emoji rendering still depends on the terminal and font
+- All elapsed times use a monotonic clock (`performance.now()`); the Working timer and footer refresh every 200ms during a reply, including first-token and tool waits. Settlement, shutdown, and session switches stop updates and restore the default Working label
+- Uses Pi's native Working indicator, not an extra widget; preserves the spinner and retry/compaction indicators. Working elapsed time continues even if another extension replaces the footer
+- TPS and reply time deliberately have different scopes: TPS excludes pre-delta waiting and tool execution; whole-reply time includes them. TTFT is a client-observed first output fragment, not necessarily the first visible answer word
+- Character-based live estimates vary with language, code, tool arguments, and hidden reasoning. Pi's `usage.output` includes reported reasoning tokens; final TPS is still a client-observed measurement, not an exact server decoding benchmark
+- Stats are stored as non-context session entries. Older replies without saved measurements cannot be reconstructed; a fork inherits only snapshots before its selected point, not an in-progress reply timer
+- Aborted/failed replies contribute their actual elapsed time and are labeled accordingly. Automatic retries/continuation (including queued work in the same run) remain in the same reply until final settlement
 - The `(sub)` subscription marker only applies to kimi-coding (the built-in modelRuntime subscription detection is not exposed to extensions)
-- Thinking tokens are included in both timing and token counts (i.e. TPS reflects throughput including reasoning)
+
+## Development
+
+Tested against Pi 1.0.4. Node.js ≥22.19 is required for the development dependencies.
+
+```bash
+npm ci
+npm test
+npm run typecheck
+```

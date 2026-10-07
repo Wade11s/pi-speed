@@ -1,34 +1,100 @@
 /**
- * pi-speed — shows session TPS (tokens per second) in the footer,
- * right after the context window indicator.
+ * pi-speed — TTFT, TPS and cumulative reply time in the footer;
+ * whole-reply elapsed time in Pi's native Working indicator.
  *
  * - While streaming: estimates live TPS from delta character counts (~4 chars/token)
- * - On each assistant message end: computes exact TPS from real usage.output
- * - Replicates the built-in footer via ctx.ui.setFooter() to insert TPS
+ * - On each assistant message end: computes client-observed TPS from usage.output
+ * - Replicates the built-in footer via ctx.ui.setFooter() to insert TTFT → TPS → TOTAL
  *   after the context window indicator
- * - /tps command: show stats details; /tps reset resets stats
+ * - Whole-reply time includes tools/retries; TTFT is the first observed non-empty delta
+ * - /tps command: show speed and timing details; /tps reset resets stats
  *
  * Install: put this under ~/.pi/agent/extensions/pi-speed/ or .pi/extensions/pi-speed/
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const CHARS_PER_TOKEN = 4; // rough estimate: 1 token ≈ 4 chars
 const UPDATE_INTERVAL_MS = 200; // throttle for streaming status refresh
+const STATS_ENTRY = "pi-speed-stats";
+const TTFT_EMOJI = "⚡️"; // U+26A1 + U+FE0F requests emoji, not monochrome text, presentation.
 
 interface CurrentStream {
-	startedAt: number; // timestamp of first delta
+	startedAt: number | undefined; // monotonic time of first non-empty delta
 	chars: number; // accumulated delta char count
 	lastUiUpdate: number;
+}
+
+type ReplyOutcome = "completed" | "aborted" | "error";
+
+interface CurrentReply {
+	startedAt: number;
+	ttftMs: number | undefined;
+	outcome: ReplyOutcome;
 }
 
 interface SessionStats {
 	messages: number; // completed assistant messages
 	tokens: number; // total output tokens
-	genMs: number; // total generation time (first delta → message end)
+	genMs: number; // measured generation time (first delta → message end)
+	timedTokens: number; // only tokens with a matching, positive generation duration
+	timedMessages: number;
 	lastTps: number | undefined;
+	replies: number;
+	replyMs: number;
+	lastReplyMs: number | undefined;
+	lastTtftMs: number | undefined;
+	lastOutcome: ReplyOutcome | undefined;
+}
+
+function emptyStats(): SessionStats {
+	return {
+		messages: 0, tokens: 0, genMs: 0, timedTokens: 0, timedMessages: 0, lastTps: undefined,
+		replies: 0, replyMs: 0, lastReplyMs: undefined, lastTtftMs: undefined, lastOutcome: undefined,
+	};
+}
+
+/** Ignore malformed/future snapshots instead of trusting arbitrary session data. */
+function readStats(data: unknown): SessionStats | undefined {
+	if (!data || typeof data !== "object") return undefined;
+	const record = data as Record<string, unknown>;
+	if (record.version !== 1 || !record.stats || typeof record.stats !== "object") return undefined;
+	const source = record.stats as Record<string, unknown>;
+	const snapshot = emptyStats();
+	const required = ["messages", "tokens", "genMs", "timedTokens", "timedMessages", "replies", "replyMs"] as const;
+	const optional = ["lastTps", "lastReplyMs", "lastTtftMs"] as const;
+	for (const key of [...required, ...optional]) {
+		const value = source[key];
+		if (value === undefined && !required.includes(key as typeof required[number])) continue;
+		if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+		Object.assign(snapshot, { [key]: value });
+	}
+	for (const key of ["messages", "timedMessages", "replies"] as const) {
+		if (!Number.isSafeInteger(snapshot[key])) return undefined;
+	}
+	if (source.lastOutcome !== undefined) {
+		if (source.lastOutcome !== "completed" && source.lastOutcome !== "aborted" && source.lastOutcome !== "error")
+			return undefined;
+		snapshot.lastOutcome = source.lastOutcome;
+	}
+	if (snapshot.timedMessages > snapshot.messages || snapshot.timedTokens > snapshot.tokens) return undefined;
+	if (snapshot.replies > 0 && (snapshot.lastReplyMs === undefined || snapshot.lastOutcome === undefined)) return undefined;
+	if (snapshot.lastReplyMs !== undefined && snapshot.lastReplyMs > snapshot.replyMs) return undefined;
+	if (snapshot.lastTtftMs !== undefined && (snapshot.lastReplyMs === undefined || snapshot.lastTtftMs > snapshot.lastReplyMs))
+		return undefined;
+	return snapshot;
+}
+
+function formatDuration(ms: number): string {
+	const seconds = Math.round(ms / 100) / 10;
+	if (seconds < 60) return `${seconds.toFixed(1)}s`;
+	const whole = Math.floor(seconds);
+	const minutes = Math.floor(whole / 60);
+	const remainder = (whole % 60).toString().padStart(2, "0");
+	if (minutes < 60) return `${minutes}m${remainder}s`;
+	return `${Math.floor(minutes / 60)}h${(minutes % 60).toString().padStart(2, "0")}m${remainder}s`;
 }
 
 // --- Helpers replicated from pi's built-in FooterComponent ---
@@ -66,6 +132,13 @@ function sanitizeStatusText(text: string): string {
  * >150 🚀 green (~p75+) / 50–150 🚄 yellow (mainstream) / <50 🐢 red (~p20-)
  */
 type SpeedTier = { emoji: string; color: "success" | "warning" | "error" };
+interface FooterMetric {
+	emoji: string;
+	label: string;
+	value: string;
+	unit?: string;
+	color?: SpeedTier["color"];
+}
 const TIER_FAST = 150;
 const TIER_SLOW = 50;
 
@@ -77,29 +150,32 @@ function speedTier(tps: number): SpeedTier {
 
 export default function (pi: ExtensionAPI) {
 	let current: CurrentStream | undefined;
-	const stats: SessionStats = { messages: 0, tokens: 0, genMs: 0, lastTps: undefined };
+	const stats = emptyStats();
+	let reply: CurrentReply | undefined;
 	let requestRender: (() => void) | undefined;
+	let liveTimer: ReturnType<typeof setInterval> | undefined;
+	let setWorkingMessage: ExtensionContext["ui"]["setWorkingMessage"] | undefined;
 
 	function fmt(n: number): string {
 		return n >= 100 ? n.toFixed(0) : n.toFixed(1);
 	}
 
 	/**
-	 * Current TPS segment (rendered right after the context window indicator),
+	 * Current TPS segment (rendered between TTFT and cumulative reply time),
 	 * or undefined when there is no data yet.
-	 * Returns the numeric text plus tier; the emoji is prepended at render time
-	 * and the number is colored by tier.
+	 * The label contains the averaging mode; only the numeric value is colored by tier.
 	 */
-	function tpsSegment(): { value: string; suffix: string; tier: SpeedTier } | undefined {
-		if (current && current.chars > 0) {
-			const elapsed = (Date.now() - current.startedAt) / 1000;
+	function tpsSegment(): FooterMetric | undefined {
+		if (current?.startedAt !== undefined && current.chars > 0) {
+			const elapsed = (performance.now() - current.startedAt) / 1000;
 			const liveTps = current.chars / CHARS_PER_TOKEN / elapsed;
-			if (!(liveTps > 0)) return { value: "…", suffix: "", tier: { emoji: "🚄", color: "warning" } };
-			return { value: fmt(liveTps), suffix: "tok/s", tier: speedTier(liveTps) };
+			if (elapsed < UPDATE_INTERVAL_MS / 1000 || !Number.isFinite(liveTps) || liveTps <= 0)
+				return { emoji: "🚄", label: "TPS", value: "…" };
+			return { ...speedTier(liveTps), label: "TPS", value: `≈${fmt(liveTps)}`, unit: "tok/s" };
 		}
-		if (stats.messages > 0 && stats.genMs > 0) {
-			const avg = stats.tokens / (stats.genMs / 1000);
-			return { value: fmt(avg), suffix: "tok/s avg", tier: speedTier(avg) };
+		if (stats.timedMessages > 0 && stats.genMs > 0) {
+			const avg = stats.timedTokens / (stats.genMs / 1000);
+			return { ...speedTier(avg), label: "TPS(avg)", value: fmt(avg), unit: "tok/s" };
 		}
 		return undefined;
 	}
@@ -109,34 +185,128 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function throttledRender() {
-		const now = Date.now();
+		const now = performance.now();
 		if (!current || now - current.lastUiUpdate >= UPDATE_INTERVAL_MS) {
 			if (current) current.lastUiUpdate = now;
 			scheduleRender();
 		}
 	}
 
-	function resetStats() {
-		stats.messages = 0;
-		stats.tokens = 0;
-		stats.genMs = 0;
-		stats.lastTps = undefined;
-		current = undefined;
+	function stopLiveTimer() {
+		if (liveTimer !== undefined) clearInterval(liveTimer);
+		liveTimer = undefined;
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		// Reset stats on new session / session switch
+	function clearWorkingMessage() {
+		setWorkingMessage?.(); // No argument restores Pi's default working label.
+		setWorkingMessage = undefined;
+	}
+
+	function updateLiveUI() {
+		if (reply && setWorkingMessage) {
+			const elapsed = Math.max(0, performance.now() - reply.startedAt);
+			setWorkingMessage(`Working… (${formatDuration(elapsed)})`);
+		}
+		scheduleRender();
+	}
+
+	function startReply(ctx: ExtensionContext) {
+		// agent_start can recur during retries/continuation: keep the original start.
+		if (!reply) reply = { startedAt: performance.now(), ttftMs: undefined, outcome: "completed" };
+		if (ctx.mode === "tui") {
+			setWorkingMessage = ctx.ui.setWorkingMessage.bind(ctx.ui);
+			if (liveTimer === undefined) {
+				liveTimer = setInterval(updateLiveUI, UPDATE_INTERVAL_MS);
+				liveTimer.unref?.();
+			}
+		}
+		updateLiveUI();
+	}
+
+	function timingSegments(): FooterMetric[] {
+		if (!reply && stats.replies === 0) return [];
+		const elapsed = reply ? Math.max(0, performance.now() - reply.startedAt) : stats.lastReplyMs!;
+		const ttft = reply ? reply.ttftMs : stats.lastTtftMs;
+		const waiting = reply !== undefined && ttft === undefined;
+		const ttftText = waiting ? `${formatDuration(elapsed)}…` : ttft === undefined ? "n/a" : formatDuration(ttft);
+		return [
+			{ emoji: waiting ? "⏳" : TTFT_EMOJI, label: "TTFT", value: ttftText },
+			{ emoji: "🕒", label: "TOTAL", value: formatDuration(stats.replyMs + (reply ? elapsed : 0)) },
+		];
+	}
+
+	function resetStats() {
+		stopLiveTimer();
+		clearWorkingMessage();
+		Object.assign(stats, emptyStats());
+		current = undefined;
+		reply = undefined;
+	}
+
+	function persistStats() {
+		// Custom entries never enter the model context.
+		pi.appendEntry(STATS_ENTRY, { version: 1, stats: { ...stats } });
+	}
+
+	function restoreStats(ctx: ExtensionContext) {
 		resetStats();
+		// Branch-local snapshots make resume, fork and /tree follow the selected history.
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== STATS_ENTRY) continue;
+			const snapshot = readStats(entry.data);
+			if (snapshot) Object.assign(stats, snapshot);
+		}
+	}
+
+	function finishReply(outcome?: ReplyOutcome) {
+		if (!reply) return;
+		const elapsed = Math.max(0, performance.now() - reply.startedAt);
+		stats.replies += 1;
+		stats.replyMs += elapsed;
+		stats.lastReplyMs = elapsed;
+		stats.lastTtftMs = reply.ttftMs;
+		stats.lastOutcome = outcome ?? reply.outcome;
+		reply = undefined;
+		current = undefined;
+		stopLiveTimer();
+		clearWorkingMessage();
+		persistStats();
+		scheduleRender();
+	}
+
+	pi.on("before_agent_start", async (_event, ctx) => { startReply(ctx); });
+	pi.on("agent_start", async (_event, ctx) => { startReply(ctx); });
+	pi.on("agent_before_settle", async (event) => {
+		if (reply) reply.outcome = event.outcome;
+	});
+	pi.on("agent_settled", async () => { finishReply(); });
+	pi.on("session_tree", async (_event, ctx) => {
+		restoreStats(ctx);
+		scheduleRender();
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		restoreStats(ctx);
 
 		if (ctx.mode !== "tui") return;
 
-		// Replace the built-in footer with a replica that inserts TPS
-		// right after the context window indicator.
+		// Replace the built-in footer with TTFT → TPS → cumulative reply time.
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			requestRender = () => tui.requestRender();
 
+			function renderMetric(metric: FooterMetric): string {
+				// Keep labels/units muted, without dimming values or emoji as a whole.
+				const value = metric.color ? theme.fg(metric.color, metric.value) :
+					metric.value.replace(/n\/a|[hms]|…/g, (unit) => theme.fg("dim", unit));
+				// Yellow fallback when a terminal ignores the emoji presentation selector.
+				const emoji = metric.emoji === TTFT_EMOJI ? theme.fg("warning", metric.emoji) : metric.emoji;
+				const unit = metric.unit ? ` ${theme.fg("dim", metric.unit)}` : "";
+				return `${emoji} ${theme.fg("dim", metric.label)} ${value}${unit}`;
+			}
+
 			return {
 				dispose: () => {
+					// The Working timer belongs to the reply, not this footer component.
 					requestRender = undefined;
 				},
 				invalidate() {},
@@ -213,19 +383,24 @@ export default function (pi: ExtensionAPI) {
 					}
 					statsParts.push(contextPercentStr);
 
-					// ★ pi-speed: TPS right after the context window indicator
-					// (emoji conveys the tier, the number is colored by tier)
+					// Keep the same metric order inline and when wrapping: TTFT → TPS → TOTAL.
+					const timings = timingSegments();
+					const segments = timings.slice(0, 1);
 					const tps = tpsSegment();
-					if (tps) {
-						const label = tps.suffix ? `${tps.value} ${tps.suffix}` : tps.value;
-						statsParts.push(`${tps.tier.emoji} ${theme.fg(tps.tier.color, label)}`);
-					}
+					if (tps) segments.push(tps);
+					segments.push(...timings.slice(1));
+					const metrics = segments.map(renderMetric);
+					const separator = theme.fg("dim", " · ");
+					const metricsText = metrics.join(separator);
 
 					if (process.env.PI_EXPERIMENTAL === "1") {
 						statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
 					}
 
-					let statsLeft = statsParts.join(" ");
+					const metricsInline = visibleWidth(`${statsParts.join(" ")} ${metricsText}`) + 2 +
+						visibleWidth(ctx.model?.id || "no-model") <= width;
+					let statsLeft = theme.fg("dim", statsParts.join(" "));
+					if (metricsInline && metrics.length > 0) statsLeft += ` ${metricsText}`;
 					let statsLeftWidth = visibleWidth(statsLeft);
 					if (statsLeftWidth > width) {
 						statsLeft = truncateToWidth(statsLeft, width, "...");
@@ -266,12 +441,22 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 
-					// Dim each part separately (statsLeft may contain color codes)
-					const dimStatsLeft = theme.fg("dim", statsLeft);
+					// Base stats are already dimmed; do not dim the metric values again.
 					const remainder = statsLine.slice(statsLeft.length);
 					const dimRemainder = theme.fg("dim", remainder);
 					const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-					const lines = [pwdLine, dimStatsLeft + dimRemainder];
+					const lines = [pwdLine, statsLeft + dimRemainder];
+					if (!metricsInline) {
+						let line = "";
+						for (const segment of metrics) {
+							const next = line ? `${line}${separator}${segment}` : segment;
+							if (line && visibleWidth(next) > width) {
+								lines.push(truncateToWidth(line, width, theme.fg("dim", "...")));
+								line = segment;
+							} else line = next;
+						}
+						if (line) lines.push(truncateToWidth(line, width, theme.fg("dim", "...")));
+					}
 
 					// Other extensions' status line (preserves built-in behavior, sorted by key)
 					const extensionStatuses = footerData.getExtensionStatuses();
@@ -291,7 +476,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_start", async (event, _ctx) => {
 		if (event.message.role !== "assistant") return;
-		current = { startedAt: 0, chars: 0, lastUiUpdate: 0 };
+		current = { startedAt: undefined, chars: 0, lastUiUpdate: 0 };
 	});
 
 	pi.on("message_update", async (event, _ctx) => {
@@ -299,57 +484,88 @@ export default function (pi: ExtensionAPI) {
 		const ev = event.assistantMessageEvent;
 		if (!ev) return;
 		if (ev.type !== "text_delta" && ev.type !== "thinking_delta" && ev.type !== "toolcall_delta") return;
-		if (!current) current = { startedAt: 0, chars: 0, lastUiUpdate: 0 };
-		if (current.startedAt === 0) current.startedAt = Date.now();
-		current.chars += ev.delta.length;
+		if (!ev.delta) return;
+		if (!current) current = { startedAt: undefined, chars: 0, lastUiUpdate: 0 };
+		const now = performance.now();
+		if (current.startedAt === undefined) current.startedAt = now;
+		if (reply && reply.ttftMs === undefined) reply.ttftMs = Math.max(0, now - reply.startedAt);
+		current.chars += Array.from(ev.delta).length;
 		throttledRender();
 	});
 
 	pi.on("message_end", async (event, _ctx) => {
 		if (event.message.role !== "assistant") return;
 
-		// Compute exact per-message TPS from real usage
-		const output = event.message.usage?.output ?? 0;
-		const elapsedMs = current && current.startedAt > 0 ? Date.now() - current.startedAt : 0;
+		if (reply) reply.outcome = event.message.stopReason === "aborted" ? "aborted" :
+			event.message.stopReason === "error" ? "error" : "completed";
+		const reportedOutput = event.message.usage?.output ?? 0;
+		const output = Number.isFinite(reportedOutput) && reportedOutput > 0 ? reportedOutput : 0;
+		const elapsedMs = current?.startedAt !== undefined ? performance.now() - current.startedAt : 0;
+		const tps = elapsedMs > 0 ? output / (elapsedMs / 1000) : undefined;
 
-		if (output > 0 && elapsedMs > 100) {
-			stats.messages += 1;
-			stats.tokens += output;
+		// Count every finalized message. Unknown/zero durations do not enter the TPS average.
+		stats.messages += 1;
+		stats.tokens += output;
+		stats.lastTps = undefined;
+		if (output > 0 && tps !== undefined && Number.isFinite(tps)) {
+			stats.timedMessages += 1;
+			stats.timedTokens += output;
 			stats.genMs += elapsedMs;
-			stats.lastTps = output / (elapsedMs / 1000);
+			stats.lastTps = tps;
 		}
 
 		current = undefined;
+		persistStats();
 		scheduleRender();
 	});
 
 	pi.on("session_shutdown", async (_event, _ctx) => {
+		// A normal shutdown may arrive before settlement (e.g. cancelling on exit).
+		if (reply) finishReply(reply.outcome === "error" ? "error" : "aborted");
+		stopLiveTimer();
+		clearWorkingMessage();
 		requestRender = undefined;
 	});
 
 	pi.registerCommand("tps", {
-		description: "Show session TPS stats (/tps reset to reset)",
+		description: "Show session TPS, whole-reply time and TTFT (/tps reset to reset)",
 		handler: async (args, ctx) => {
 			if (args.trim().toLowerCase() === "reset") {
+				if (reply || current) {
+					ctx.ui.notify("Cannot reset stats while a reply is running.", "warning");
+					return;
+				}
 				resetStats();
+				persistStats();
 				scheduleRender();
-				ctx.ui.notify("TPS stats reset", "info");
+				ctx.ui.notify("Speed and reply timing stats reset", "info");
 				return;
 			}
 
-			if (stats.messages === 0) {
+			if (stats.messages === 0 && stats.replies === 0 && !reply) {
 				ctx.ui.notify("No completed assistant messages yet — send a prompt first.", "info");
 				return;
 			}
 
-			const avg = stats.tokens / (stats.genMs / 1000);
+			const avg = stats.genMs > 0 ? stats.timedTokens / (stats.genMs / 1000) : undefined;
 			const lines = [
 				`Messages: ${stats.messages}`,
 				`Output tokens: ${stats.tokens.toLocaleString()}`,
 				`Generation time: ${(stats.genMs / 1000).toFixed(1)}s`,
 				`Last TPS: ${stats.lastTps !== undefined ? fmt(stats.lastTps) : "n/a"}`,
-				`Session avg TPS: ${fmt(avg)}`,
+				`Session avg TPS: ${avg !== undefined ? fmt(avg) : "n/a"}`,
+				`TPS samples: ${stats.timedMessages}/${stats.messages}`,
+				`Replies: ${stats.replies}`,
+				`Last reply: ${stats.lastReplyMs === undefined ? "n/a" : formatDuration(stats.lastReplyMs)}`,
+				`Last TTFT: ${stats.lastTtftMs === undefined ? "n/a" : formatDuration(stats.lastTtftMs)}`,
+				`Last outcome: ${stats.lastOutcome ?? "n/a"}`,
+				`Session reply time: ${formatDuration(stats.replyMs)}`,
 			];
+			if (reply) {
+				const elapsed = Math.max(0, performance.now() - reply.startedAt);
+				lines.push(`Current reply: ${formatDuration(elapsed)} (running)`);
+				lines.push(`Current TTFT: ${reply.ttftMs === undefined ? "waiting" : formatDuration(reply.ttftMs)}`);
+			}
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});

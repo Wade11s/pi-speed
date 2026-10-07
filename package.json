@@ -1,7 +1,7 @@
 {
   "name": "pi-speed",
   "version": "0.1.0",
-  "description": "Pi extension: live TPS (tokens/sec) indicator with speed tiers in the footer, right after the context window",
+  "description": "Pi extension: TTFT, TPS and session time in the footer, with whole-reply timing in the native Working indicator",
   "license": "MIT",
   "type": "module",
   "main": "index.ts",
@@ -27,8 +27,20 @@
     "url": "https://github.com/Wade11s/pi-speed/issues"
   },
   "homepage": "https://github.com/Wade11s/pi-speed#readme",
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4",
+    "@types/node": "^22.19.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   },
   "pi": {
     "extensions": ["./index.ts"]
